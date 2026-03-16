@@ -14,14 +14,15 @@ type SelectMode int
 const (
 	RandomSelect SelectMode = iota
 	RoundRobinSelect
-	// TODO 一致性hash
+	ConsistentHash
 )
 
 // Discovery 服务发现基本接口
 type Discovery interface {
 	Refresh() error
 	Update(servers []string) error
-	Get(mode SelectMode) (string, error)
+	// Get 传一个key值 当使用一致性哈希算法时使用
+	Get(mode SelectMode, key string) (string, error)
 	GetAll() ([]string, error)
 }
 
@@ -33,6 +34,8 @@ type MultiServersDiscovery struct {
 	servers []string
 	// 记录轮询到的位置
 	index int
+	// 一致性哈希使用的哈希环
+	hashMap *Map
 }
 
 func NewMultiServerDiscovery(servers []string) *MultiServersDiscovery {
@@ -42,6 +45,10 @@ func NewMultiServerDiscovery(servers []string) *MultiServersDiscovery {
 	}
 	// 避免每次都从0开始 随机初始化一个正值
 	d.index = d.r.Intn(math.MaxInt32 - 1)
+	// 构造hash环 默认一个节点会有50个虚拟节点 使用默认hash算法
+	d.hashMap = New(50, nil)
+	// 将服务节点插入哈希环
+	d.hashMap.Add(servers...)
 	return d
 }
 
@@ -56,10 +63,13 @@ func (d *MultiServersDiscovery) Update(servers []string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.servers = servers
+	// 更新服务列表 重建哈希环
+	d.hashMap = New(50, nil)
+	d.hashMap.Add(servers...)
 	return nil
 }
 
-func (d *MultiServersDiscovery) Get(mode SelectMode) (string, error) {
+func (d *MultiServersDiscovery) Get(mode SelectMode, key string) (string, error) {
 	// 排他写锁
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -76,6 +86,12 @@ func (d *MultiServersDiscovery) Get(mode SelectMode) (string, error) {
 		s := d.servers[d.index%n]
 		d.index = (d.index + 1) % n
 		return s, nil
+	case ConsistentHash:
+		if key == "" {
+			return "", errors.New("rpc discovery: key is required for ConsistentHash")
+		}
+		// 选择相应服务节点
+		return d.hashMap.Get(key), nil
 	default:
 		return "", errors.New("rpc discovery: not supported select mode")
 	}

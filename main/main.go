@@ -1,115 +1,100 @@
 package main
 
 import (
-	"GeeRPC"
-	"GeeRPC/registry"
-	"GeeRPC/xclient"
 	"context"
+	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"sync"
 	"time"
+
+	"GeeRPC"
+	"GeeRPC/codec"
+	"GeeRPC/codec/pb"
 )
 
-type Foo int
+// HelloService --- 1. 定义测试服务 ---
+type HelloService struct{}
 
-type Args struct{ Num1, Num2 int }
-
-// Sum 远端服务器方法
-func (f Foo) Sum(args Args, reply *int) error {
-	*reply = args.Num1 + args.Num2
+func (s *HelloService) SayHello(args *pb.HelloArgs, reply *pb.HelloReply) error {
+	reply.Message = fmt.Sprintf("Hello, %s! You are %d years old.", args.Name, args.Age)
 	return nil
 }
 
-func (f Foo) Sleep(args Args, reply *int) error {
-	time.Sleep(time.Second * time.Duration(args.Num1))
-	*reply = args.Num1 + args.Num2
-	return nil
-}
+func startServer(addr chan string) {
+	// 注册服务
+	_ = GeeRPC.Register(new(HelloService))
 
-func startRegistry(wg *sync.WaitGroup) {
-	l, _ := net.Listen("tcp", ":9999")
-	registry.HandleHTTP()
-	wg.Done()
-	_ = http.Serve(l, nil)
-}
-
-func startServer(registryAddr string, wg *sync.WaitGroup) {
-	var foo Foo
-	l, _ := net.Listen("tcp", ":0")
-	server := GeeRPC.NewServer()
-	_ = server.Register(&foo)
-	registry.Heartbeat(registryAddr, "tcp@"+l.Addr().String(), 0)
-	wg.Done()
-	server.Accept(l)
-}
-
-func foo(xc *xclient.XClient, ctx context.Context, typ, serviceMethod string, args *Args) {
-	var reply int
-	var err error
-	switch typ {
-	case "call":
-		err = xc.Call(ctx, serviceMethod, args, &reply)
-	case "broadcast":
-		err = xc.Broadcast(ctx, serviceMethod, args, &reply)
-	}
+	// 监听本地随机可用端口
+	l, err := net.Listen("tcp", ":0")
 	if err != nil {
-		log.Printf("%s %s error: %v", typ, serviceMethod, err)
-	} else {
-		log.Printf("%s %s success: %d + %d = %d", typ, serviceMethod, args.Num1, args.Num2, reply)
+		log.Fatal("network error:", err)
 	}
-}
+	log.Println("RPC Server is running on", l.Addr().String())
 
-func call(registry string) {
-	d := xclient.NewGeeRegistryDiscovery(registry, 0)
-	xc := xclient.NewXClient(d, xclient.RandomSelect, nil)
-	defer func() { _ = xc.Close() }()
-	// send request & receive response
-	var wg sync.WaitGroup
-	for i := 0; i < 5; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			foo(xc, context.Background(), "call", "Foo.Sum", &Args{Num1: i, Num2: i * i})
-		}(i)
-	}
-	wg.Wait()
-}
+	// 把真实端口传给客户端
+	addr <- l.Addr().String()
 
-func broadcast(registry string) {
-	d := xclient.NewGeeRegistryDiscovery(registry, 0)
-	xc := xclient.NewXClient(d, xclient.RandomSelect, nil)
-	defer func() { _ = xc.Close() }()
-	var wg sync.WaitGroup
-	for i := 0; i < 5; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			foo(xc, context.Background(), "broadcast", "Foo.Sum", &Args{Num1: i, Num2: i * i})
-			// expect 2 - 5 timeout
-			ctx, _ := context.WithTimeout(context.Background(), time.Second*3)
-			foo(xc, ctx, "broadcast", "Foo.Sleep", &Args{Num1: i, Num2: i * i})
-		}(i)
-	}
-	wg.Wait()
+	// 启动服务器接收请求
+	GeeRPC.Accept(l)
 }
 
 func main() {
 	log.SetFlags(0)
-	registryAddr := "http://localhost:9999/_geerpc_/registry"
+	addr := make(chan string)
+
+	// 启动服务端协程
+	go startServer(addr)
+
+	// 获取服务端的地址
+	serverAddr := <-addr
+
+	// --- 2. 客户端连接 (强制指定使用 Protobuf 编码) ---
+	// 你的 Option 结构体需要支持 CodecType
+	client, err := GeeRPC.Dial("tcp", serverAddr, &GeeRPC.Option{
+		MagicNumber:    GeeRPC.MagicNumber,
+		CodecType:      codec.ProtobufType, // 明确使用刚才写的 ProtobufCodec
+		ConnectTimeout: time.Second * 10,
+	})
+	if err != nil {
+		log.Fatal("dial error:", err)
+	}
+	defer client.Close()
+
+	time.Sleep(time.Second) // 等待服务器就绪
+
+	// --- 3. 疯狂发包测试粘包 (高并发 + 紧凑循环) ---
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go startRegistry(&wg)
-	wg.Wait()
+	requestCount := 5000 // 一瞬间发送 5000 个请求
 
-	time.Sleep(time.Second)
-	wg.Add(2)
-	go startServer(registryAddr, &wg)
-	go startServer(registryAddr, &wg)
-	wg.Wait()
+	log.Printf("Start sending %d concurrent requests to test sticky packets...", requestCount)
+	startTime := time.Now()
 
-	time.Sleep(time.Second)
-	call(registryAddr)
-	broadcast(registryAddr)
+	for i := 0; i < requestCount; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+
+			// 构造不同的请求大小，更容易诱发粘包
+			name := fmt.Sprintf("User_%d", i)
+			for j := 0; j < i%5; j++ {
+				name += "_padding" // 故意让每个包的大小不一样
+			}
+
+			args := &pb.HelloArgs{Name: name, Age: int32(20 + i%50)}
+			reply := &pb.HelloReply{}
+
+			// 发起同步调用
+			err := client.Call(context.Background(), "HelloService.SayHello", args, reply)
+			if err != nil {
+				log.Printf("Call error on request %d: %v", i, err)
+			} else if i%1000 == 0 {
+				// 每 1000 次打印一次进度，证明数据没有乱码
+				log.Printf("[Success] %s", reply.Message)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	log.Printf("All %d requests finished in %v. If there are no errors above, sticky packets are solved!", requestCount, time.Since(startTime))
 }

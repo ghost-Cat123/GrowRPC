@@ -26,8 +26,9 @@ type NewCodecFunc func(io.ReadWriteCloser) Codec
 type Type string
 
 const (
-	GobType  Type = "application/gob"
-	JsonType Type = "application/json"
+	GobType      Type = "application/gob"
+	JsonType     Type = "application/json"
+	ProtobufType Type = "application/protobuf"
 )
 
 // NewCodecFuncMap 根据解析的形式创建不同构造函数 类似于工厂模式
@@ -36,4 +37,6 @@ var NewCodecFuncMap map[Type]NewCodecFunc
 func init() {
 	NewCodecFuncMap = make(map[Type]NewCodecFunc)
 	NewCodecFuncMap[GobType] = NewGobCodec
+	NewCodecFuncMap[JsonType] = NewJsonCodec
+	NewCodecFuncMap[ProtobufType] = NewProtobufCodec
 }

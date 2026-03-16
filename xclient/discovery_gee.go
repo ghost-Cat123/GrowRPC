@@ -71,12 +71,12 @@ func (d *GeeRegistryDiscovery) Refresh() error {
 	return nil
 }
 
-func (d *GeeRegistryDiscovery) Get(mode SelectMode) (string, error) {
+func (d *GeeRegistryDiscovery) Get(mode SelectMode, key string) (string, error) {
 	// 都需要先刷新保证服务列表没有过期
 	if err := d.Refresh(); err != nil {
 		return "", err
 	}
-	return d.MultiServersDiscovery.Get(mode)
+	return d.MultiServersDiscovery.Get(mode, key)
 }
 
 func (d *GeeRegistryDiscovery) GetAll() ([]string, error) {
