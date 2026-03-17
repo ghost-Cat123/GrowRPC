@@ -1,100 +1,119 @@
 package main
 
 import (
+	"GeeRPC"
+	"GeeRPC/midware"
 	"context"
-	"fmt"
 	"log"
 	"net"
-	"sync"
 	"time"
-
-	"GeeRPC"
-	"GeeRPC/codec"
-	"GeeRPC/codec/pb"
 )
 
-// HelloService --- 1. 定义测试服务 ---
-type HelloService struct{}
+// =======================================================
+// 1. 准备测试业务代码
+// =======================================================
 
-func (s *HelloService) SayHello(args *pb.HelloArgs, reply *pb.HelloReply) error {
-	reply.Message = fmt.Sprintf("Hello, %s! You are %d years old.", args.Name, args.Age)
+type MathArgs struct {
+	A, B int
+}
+
+type MathReply struct {
+	Result int
+}
+
+type MathService struct{}
+
+// Add 正常的方法
+func (m *MathService) Add(args *MathArgs, reply *MathReply) error {
+	// 模拟一点业务耗时，让 Logger 拦截器能打印出时间
+	time.Sleep(time.Millisecond * 50)
+	reply.Result = args.A + args.B
 	return nil
 }
 
-func startServer(addr chan string) {
-	// 注册服务
-	_ = GeeRPC.Register(new(HelloService))
+// Divide 故意引发 Panic 的方法（测试 Recovery 拦截器）
+func (m *MathService) Divide(args *MathArgs, reply *MathReply) error {
+	if args.B == 0 {
+		// 这里故意触发 panic，而不是 return error
+		panic("divide by zero error triggered intentionally!")
+	}
+	reply.Result = args.A / args.B
+	return nil
+}
 
-	// 监听本地随机可用端口
+// =======================================================
+// 3. 启动服务端
+// =======================================================
+
+func startServer(addr chan string) {
+	// 【核心：注册中间件】
+	// 注意顺序：最外层是 Logger，往里一层是 Recovery。
+	// 洋葱模型执行顺序：Logger进 -> Recovery进 -> 核心逻辑 -> Recovery出 -> Logger出
+	GeeRPC.Use(midware.LoggerInterceptor, midware.RecoveryInterceptor)
+
+	// 注册服务
+	GeeRPC.Register(new(MathService))
+
+	// 监听端口
 	l, err := net.Listen("tcp", ":0")
 	if err != nil {
 		log.Fatal("network error:", err)
 	}
-	log.Println("RPC Server is running on", l.Addr().String())
-
-	// 把真实端口传给客户端
+	log.Println("RPC 服务端启动成功，地址:", l.Addr().String())
 	addr <- l.Addr().String()
 
-	// 启动服务器接收请求
+	// 接收请求
 	GeeRPC.Accept(l)
 }
 
-func main() {
-	log.SetFlags(0)
-	addr := make(chan string)
+// =======================================================
+// 4. 客户端测试逻辑
+// =======================================================
 
-	// 启动服务端协程
+func main() {
+	// 取消日志的时间前缀，让输出更干净，方便我们观察
+	log.SetFlags(0)
+
+	addr := make(chan string)
 	go startServer(addr)
 
-	// 获取服务端的地址
+	// 获取服务端动态端口
 	serverAddr := <-addr
 
-	// --- 2. 客户端连接 (强制指定使用 Protobuf 编码) ---
-	// 你的 Option 结构体需要支持 CodecType
-	client, err := GeeRPC.Dial("tcp", serverAddr, &GeeRPC.Option{
-		MagicNumber:    GeeRPC.MagicNumber,
-		CodecType:      codec.ProtobufType, // 明确使用刚才写的 ProtobufCodec
-		ConnectTimeout: time.Second * 10,
-	})
+	// 创建客户端
+	client, err := GeeRPC.Dial("tcp", serverAddr, GeeRPC.DefaultOption) // 如果你测了 Protobuf，把 Option 改一下即可
 	if err != nil {
 		log.Fatal("dial error:", err)
 	}
 	defer client.Close()
 
-	time.Sleep(time.Second) // 等待服务器就绪
+	time.Sleep(time.Second) // 等待服务端就绪
 
-	// --- 3. 疯狂发包测试粘包 (高并发 + 紧凑循环) ---
-	var wg sync.WaitGroup
-	requestCount := 5000 // 一瞬间发送 5000 个请求
-
-	log.Printf("Start sending %d concurrent requests to test sticky packets...", requestCount)
-	startTime := time.Now()
-
-	for i := 0; i < requestCount; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-
-			// 构造不同的请求大小，更容易诱发粘包
-			name := fmt.Sprintf("User_%d", i)
-			for j := 0; j < i%5; j++ {
-				name += "_padding" // 故意让每个包的大小不一样
-			}
-
-			args := &pb.HelloArgs{Name: name, Age: int32(20 + i%50)}
-			reply := &pb.HelloReply{}
-
-			// 发起同步调用
-			err := client.Call(context.Background(), "HelloService.SayHello", args, reply)
-			if err != nil {
-				log.Printf("Call error on request %d: %v", i, err)
-			} else if i%1000 == 0 {
-				// 每 1000 次打印一次进度，证明数据没有乱码
-				log.Printf("[Success] %s", reply.Message)
-			}
-		}(i)
+	log.Println("\n--- 测试案例 1：正常的 RPC 调用 ---")
+	args := &MathArgs{A: 10, B: 20}
+	reply := &MathReply{}
+	err = client.Call(context.Background(), "MathService.Add", args, reply)
+	if err != nil {
+		log.Printf("客户端收到错误: %v", err)
+	} else {
+		log.Printf("客户端收到结果: %d + %d = %d", args.A, args.B, reply.Result)
 	}
 
-	wg.Wait()
-	log.Printf("All %d requests finished in %v. If there are no errors above, sticky packets are solved!", requestCount, time.Since(startTime))
+	time.Sleep(time.Second)
+
+	log.Println("\n--- 测试案例 2：故意触发 Panic 的 RPC 调用 ---")
+	// 除数设为 0，触发业务代码里的 panic
+	panicArgs := &MathArgs{A: 10, B: 0}
+	panicReply := &MathReply{}
+	err = client.Call(context.Background(), "MathService.Divide", panicArgs, panicReply)
+
+	// 预期：服务端不会崩溃，且客户端能优雅地收到 err
+	if err != nil {
+		log.Printf("客户端成功收到服务端兜底错误: %v", err)
+	} else {
+		log.Printf("客户端收到结果 (不应该走到这里): %v", panicReply.Result)
+	}
+
+	time.Sleep(time.Second)
+	log.Println("\n测试完成！服务端没有因为 Panic 退出，中间件工作正常！")
 }

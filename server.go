@@ -40,7 +40,10 @@ var DefaultOption = &Option{
 
 // Server RPC服务器
 type Server struct {
+	// 注册服务列表
 	serviceMap sync.Map
+	// 请求中间件列表
+	interceptors []Interceptor
 }
 
 // NewServer Server构造函数
@@ -50,6 +53,16 @@ func NewServer() *Server {
 
 // DefaultServer Server实例
 var DefaultServer = NewServer()
+
+// Use 服务使用中间件
+func (server *Server) Use(interceptors ...Interceptor) {
+	server.interceptors = append(server.interceptors, interceptors...)
+}
+
+// Use 默认实例调用
+func Use(interceptors ...Interceptor) {
+	DefaultServer.interceptors = append(DefaultServer.interceptors, interceptors...)
+}
 
 // Accept 监听服务器请求时接收链接
 func (server *Server) Accept(lis net.Listener) {
@@ -119,7 +132,7 @@ func (server *Server) serveCodec(cc codec.Codec) {
 	_ = cc.Close()
 }
 
-type request struct {
+type Request struct {
 	// 请求头
 	h *codec.Header
 	// 请求参数和响应值
@@ -129,6 +142,20 @@ type request struct {
 	// 服务
 	svc *service
 }
+
+// CallInfo 中间件相关
+// CallInfo 暴露给中间件的只读参数
+type CallInfo struct {
+	ServiceMethod string
+	Header        *codec.Header
+	ReqArgs       interface{}
+}
+
+// HandlerFunc 基本类型 只传请求
+type HandlerFunc func(i *CallInfo) error
+
+// Interceptor 中间件类型
+type Interceptor func(next HandlerFunc) HandlerFunc
 
 func (server *Server) readRequestHeader(cc codec.Codec) (*codec.Header, error) {
 	var h codec.Header
@@ -141,12 +168,12 @@ func (server *Server) readRequestHeader(cc codec.Codec) (*codec.Header, error) {
 	return &h, nil
 }
 
-func (server *Server) readRequest(cc codec.Codec) (*request, error) {
+func (server *Server) readRequest(cc codec.Codec) (*Request, error) {
 	h, err := server.readRequestHeader(cc)
 	if err != nil {
 		return nil, err
 	}
-	req := &request{h: h}
+	req := &Request{h: h}
 	req.svc, req.mtype, err = server.findService(h.ServiceMethod)
 	if err != nil {
 		return req, err
@@ -180,7 +207,8 @@ func (server *Server) sendResponse(cc codec.Codec, h *codec.Header, body interfa
 
 // 正常情况 由处理方法调用的goroutine发送响应
 // 超时情况 由主goroutine发送超时响应
-func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.Mutex, wg *sync.WaitGroup, timeout time.Duration) {
+// 使用拦截器处理请求
+func (server *Server) handleRequest(cc codec.Codec, req *Request, sending *sync.Mutex, wg *sync.WaitGroup, timeout time.Duration) {
 	// 需要注册rpc方法到正确的响应中
 	// 计数器-1 表示已处理完成一个响应
 	defer wg.Done()
@@ -189,7 +217,26 @@ func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.
 	sent := make(chan struct{})
 	go func() {
 		// 方法调用
-		err := req.svc.call(req.mtype, req.argv, req.replyv)
+		// 添加拦截器拦截
+		info := &CallInfo{
+			ServiceMethod: req.h.ServiceMethod,
+			Header:        req.h,
+			ReqArgs:       req.argv,
+		}
+
+		var handler HandlerFunc = func(i *CallInfo) error {
+			// 真正调用的方法
+			return req.svc.call(req.mtype, req.argv, req.replyv)
+		}
+
+		// 组装中间件
+		for i := len(server.interceptors) - 1; i >= 0; i-- {
+			handler = server.interceptors[i](handler)
+		}
+
+		// 调用最后的方法
+		err := handler(info)
+
 		// 标记调用完成
 		called <- struct{}{}
 		// 错误分支
