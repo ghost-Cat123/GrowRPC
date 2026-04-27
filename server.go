@@ -1,7 +1,7 @@
-package GeeRPC
+package GrowRPC
 
 import (
-	"GeeRPC/codec"
+	"GrowRPC/codec"
 	"encoding/json"
 	"errors"
 	"fmt"

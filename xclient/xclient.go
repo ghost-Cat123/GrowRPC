@@ -1,7 +1,7 @@
 package xclient
 
 import (
-	. "GeeRPC"
+	. "GrowRPC"
 	"context"
 	"io"
 	"log"

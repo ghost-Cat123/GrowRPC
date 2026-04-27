@@ -1,7 +1,7 @@
-package GeeRPC
+package GrowRPC
 
 import (
-	"GeeRPC/codec"
+	"GrowRPC/codec"
 	"bufio"
 	"context"
 	"encoding/json"

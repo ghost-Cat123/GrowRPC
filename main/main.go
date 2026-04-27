@@ -1,8 +1,8 @@
 package main
 
 import (
-	"GeeRPC"
-	"GeeRPC/midware"
+	"GrowRPC"
+	"GrowRPC/midware"
 	"context"
 	"log"
 	"net"
@@ -49,10 +49,10 @@ func startServer(addr chan string) {
 	// 【核心：注册中间件】
 	// 注意顺序：最外层是 Logger，往里一层是 Recovery。
 	// 洋葱模型执行顺序：Logger进 -> Recovery进 -> 核心逻辑 -> Recovery出 -> Logger出
-	GeeRPC.Use(midware.LoggerInterceptor, midware.RecoveryInterceptor)
+	GrowRPC.Use(midware.LoggerInterceptor, midware.RecoveryInterceptor)
 
 	// 注册服务
-	GeeRPC.Register(new(MathService))
+	GrowRPC.Register(new(MathService))
 
 	// 监听端口
 	l, err := net.Listen("tcp", ":0")
@@ -63,7 +63,7 @@ func startServer(addr chan string) {
 	addr <- l.Addr().String()
 
 	// 接收请求
-	GeeRPC.Accept(l)
+	GrowRPC.Accept(l)
 }
 
 // =======================================================
@@ -81,7 +81,7 @@ func main() {
 	serverAddr := <-addr
 
 	// 创建客户端
-	client, err := GeeRPC.Dial("tcp", serverAddr, GeeRPC.DefaultOption) // 如果你测了 Protobuf，把 Option 改一下即可
+	client, err := GrowRPC.Dial("tcp", serverAddr, GrowRPC.DefaultOption) // 如果你测了 Protobuf，把 Option 改一下即可
 	if err != nil {
 		log.Fatal("dial error:", err)
 	}

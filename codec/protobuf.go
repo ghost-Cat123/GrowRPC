@@ -1,7 +1,7 @@
 package codec
 
 import (
-	"GeeRPC/codec/pb"
+	"GrowRPC/codec/pb"
 	"bufio"
 	"encoding/binary"
 	"encoding/json"
