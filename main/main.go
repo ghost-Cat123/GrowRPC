@@ -24,7 +24,7 @@ type MathReply struct {
 type MathService struct{}
 
 // Add 正常的方法
-func (m *MathService) Add(args *MathArgs, reply *MathReply) error {
+func (m *MathService) Add(_ context.Context, args *MathArgs, reply *MathReply) error {
 	// 模拟一点业务耗时，让 Logger 拦截器能打印出时间
 	time.Sleep(time.Millisecond * 50)
 	reply.Result = args.A + args.B
@@ -32,7 +32,7 @@ func (m *MathService) Add(args *MathArgs, reply *MathReply) error {
 }
 
 // Divide 故意引发 Panic 的方法（测试 Recovery 拦截器）
-func (m *MathService) Divide(args *MathArgs, reply *MathReply) error {
+func (m *MathService) Divide(_ context.Context, args *MathArgs, reply *MathReply) error {
 	if args.B == 0 {
 		// 这里故意触发 panic，而不是 return error
 		panic("divide by zero error triggered intentionally!")
@@ -52,7 +52,9 @@ func startServer(addr chan string) {
 	GrowRPC.Use(midware.LoggerInterceptor, midware.RecoveryInterceptor)
 
 	// 注册服务
-	GrowRPC.Register(new(MathService))
+	mathService := new(MathService)
+	GrowRPC.RegisterMethod[MathArgs, MathReply](GrowRPC.DefaultServer, "MathService.Add", mathService.Add)
+	GrowRPC.RegisterMethod[MathArgs, MathReply](GrowRPC.DefaultServer, "MathService.Divide", mathService.Divide)
 
 	// 监听端口
 	l, err := net.Listen("tcp", ":0")

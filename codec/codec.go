@@ -11,6 +11,8 @@ type Header struct {
 	Seq uint64
 	// 服务端错误信息
 	Error string
+	// 用于传输 Context 数据
+	Metadata map[string]string
 }
 
 // Codec 对消息体编解码的结构

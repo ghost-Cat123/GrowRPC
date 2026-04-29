@@ -2,6 +2,7 @@ package GrowRPC
 
 import (
 	"GrowRPC/codec"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,8 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"reflect"
-	"strings"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -135,17 +135,14 @@ func (server *Server) serveCodec(cc codec.Codec) {
 type Request struct {
 	// 请求头
 	h *codec.Header
-	// 请求参数和响应值
-	argv, replyv reflect.Value
-	// 方法类型
-	mtype *methodType
-	// 服务
-	svc *service
+	// 请求参数和响应值交给 wrapper 处理
+	handler MethodHandler
 }
 
 // CallInfo 中间件相关
 // CallInfo 暴露给中间件的只读参数
 type CallInfo struct {
+	Ctx           context.Context
 	ServiceMethod string
 	Header        *codec.Header
 	ReqArgs       interface{}
@@ -174,24 +171,11 @@ func (server *Server) readRequest(cc codec.Codec) (*Request, error) {
 		return nil, err
 	}
 	req := &Request{h: h}
-	req.svc, req.mtype, err = server.findService(h.ServiceMethod)
+	req.handler, err = server.findHandler(h.ServiceMethod)
 	if err != nil {
 		return req, err
 	}
-	req.argv = req.mtype.newArgv()
-	req.replyv = req.mtype.newReplyv()
-
-	// 确保argvi是一个指针
-	argvi := req.argv.Interface()
-	if req.argv.Type().Kind() != reflect.Ptr {
-		// 使用地址
-		argvi = req.argv.Addr().Interface()
-	}
-	// 反序列化请求报文 转化成argv
-	if err = cc.ReadBody(argvi); err != nil {
-		log.Println("rpc server: read body err:", err)
-		return req, nil
-	}
+	// 不在此处进行 cc.ReadBody，反序列化将推迟到 MethodHandler 内部执行
 	return req, nil
 }
 
@@ -213,20 +197,41 @@ func (server *Server) handleRequest(cc codec.Codec, req *Request, sending *sync.
 	// 计数器-1 表示已处理完成一个响应
 	defer wg.Done()
 	// 拆分处理过程
-	called := make(chan struct{})
-	sent := make(chan struct{})
+	called := make(chan struct{}, 1)
+	sent := make(chan struct{}, 1)
 	go func() {
 		// 方法调用
 		// 添加拦截器拦截
+		ctx := context.Background()
+		var cancel context.CancelFunc
+		if req.h.Metadata != nil {
+			if deadlineStr, ok := req.h.Metadata["deadline"]; ok {
+				if deadlineMs, err := strconv.ParseInt(deadlineStr, 10, 64); err == nil {
+					ctx, cancel = context.WithDeadline(ctx, time.UnixMilli(deadlineMs))
+				}
+			}
+		}
+		if cancel == nil {
+			ctx, cancel = context.WithCancel(ctx)
+		}
+		defer cancel()
+
 		info := &CallInfo{
+			Ctx:           ctx,
 			ServiceMethod: req.h.ServiceMethod,
 			Header:        req.h,
-			ReqArgs:       req.argv,
+			ReqArgs:       nil, // 泛型改造后由于不知道具体类型，置为空
 		}
 
+		var respData interface{}
 		var handler HandlerFunc = func(i *CallInfo) error {
-			// 真正调用的方法
-			return req.svc.call(req.mtype, req.argv, req.replyv)
+			// 闭包注入给泛型包装器，使其能读取反序列化
+			decodeFunc := func(v interface{}) error {
+				return cc.ReadBody(v)
+			}
+			resp, err := req.handler(i.Ctx, decodeFunc)
+			respData = resp
+			return err
 		}
 
 		// 组装中间件
@@ -247,9 +252,8 @@ func (server *Server) handleRequest(cc codec.Codec, req *Request, sending *sync.
 			sent <- struct{}{}
 			return
 		}
-		// 将reply序列化为字节流 构造响应报文
 		// 成功分支
-		server.sendResponse(cc, req.h, req.replyv.Interface(), sending)
+		server.sendResponse(cc, req.h, respData, sending)
 		// 通过管道发送
 		// 标记响应完成
 		sent <- struct{}{}
@@ -272,43 +276,13 @@ func (server *Server) handleRequest(cc codec.Codec, req *Request, sending *sync.
 	}
 }
 
-// Register 注册服务
-func (server *Server) Register(rcvr interface{}) error {
-	s := newService(rcvr)
-	// 判断服务是否已经注册
-	if _, dup := server.serviceMap.LoadOrStore(s.name, s); dup {
-		return errors.New("rpc: service already defined: " + s.name)
-	}
-	return nil
-}
-
-func Register(rcvr interface{}) error {
-	return DefaultServer.Register(rcvr)
-}
-
 // 发现服务
-func (server *Server) findService(serviceMethod string) (svc *service, mtype *methodType, err error) {
-	dot := strings.LastIndex(serviceMethod, ".")
-	if dot < 0 {
-		err = errors.New("rpc server: service/method request ill-formed: " + serviceMethod)
-		return
-	}
-	// Service.Method 拆成两部分
-	serviceName, methodName := serviceMethod[:dot], serviceMethod[dot+1:]
-	// 在map中找到对应service实例
-	svci, ok := server.serviceMap.Load(serviceName)
+func (server *Server) findHandler(serviceMethod string) (MethodHandler, error) {
+	handlerI, ok := server.serviceMap.Load(serviceMethod)
 	if !ok {
-		err = errors.New("rpc server: can't find service " + serviceName)
-		return
+		return nil, errors.New("rpc server: can't find service method " + serviceMethod)
 	}
-	// 断言转成*service类型
-	svc = svci.(*service)
-	// 从method中找到对应methodType
-	mtype = svc.method[methodName]
-	if mtype == nil {
-		err = errors.New("rpc server: can't find method " + methodName)
-	}
-	return
+	return handlerI.(MethodHandler), nil
 }
 
 // 使服务端支持HTTP协议

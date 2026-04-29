@@ -46,6 +46,7 @@ func (p *ProtobufCodec) ReadHeader(h *Header) error {
 	h.ServiceMethod = pbHeader.ServiceMethod
 	h.Seq = pbHeader.Seq
 	h.Error = pbHeader.Error
+	h.Metadata = pbHeader.Metadata
 
 	return nil
 }
@@ -68,6 +69,7 @@ func (p *ProtobufCodec) Write(h *Header, body interface{}) error {
 		ServiceMethod: h.ServiceMethod,
 		Seq:           h.Seq,
 		Error:         h.Error,
+		Metadata:      h.Metadata,
 	}
 
 	// 2. 发送header
@@ -138,9 +140,9 @@ func (p *ProtobufCodec) writeMessage(msg proto.Message) error {
 }
 
 // 写入一个 0 长度的数据包[0,0,0,0]，防止对端读取阻塞或越界
-func (c *ProtobufCodec) writeEmptyBody() error {
-	if err := binary.Write(c.buf, binary.BigEndian, uint32(0)); err != nil {
+func (p *ProtobufCodec) writeEmptyBody() error {
+	if err := binary.Write(p.buf, binary.BigEndian, uint32(0)); err != nil {
 		return err
 	}
-	return c.buf.Flush()
+	return p.buf.Flush()
 }

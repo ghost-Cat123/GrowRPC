@@ -12,6 +12,7 @@ message RequestHeader {
   string service_method = 1;
   uint64 seq = 2;
   string error = 3;
+  map<string, string> metadata = 4;
 }
 
 // 2. 我们的测试业务：打招呼的请求参数

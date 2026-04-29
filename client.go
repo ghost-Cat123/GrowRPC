@@ -30,6 +30,8 @@ type Call struct {
 	Error error
 	// 异步通知通道 调用完成触发客户端回调
 	Done chan *Call
+	// 透传的上下文数据
+	Metadata map[string]string
 }
 
 // 异步调用 通知调用方
@@ -268,6 +270,7 @@ func (client *Client) send(call *Call) {
 	client.header.ServiceMethod = call.ServiceMethod
 	client.header.Seq = seq
 	client.header.Error = ""
+	client.header.Metadata = call.Metadata
 
 	// 编码并发送请求
 	if err := client.cc.Write(&client.header, call.Args); err != nil {
@@ -280,8 +283,13 @@ func (client *Client) send(call *Call) {
 	}
 }
 
-// Go 异步接口 返回call实例
+// Go 异步接口 返回call实例 (为了兼容上层调用保留原签名)
 func (client *Client) Go(serviceMethod string, args, reply interface{}, done chan *Call) *Call {
+	return client.goWithContext(context.Background(), serviceMethod, args, reply, done)
+}
+
+// 内部包含 context 透传的异步调用
+func (client *Client) goWithContext(ctx context.Context, serviceMethod string, args, reply interface{}, done chan *Call) *Call {
 	if done == nil {
 		// 创建一个channel 设置10的缓冲区
 		done = make(chan *Call, 10)
@@ -296,11 +304,19 @@ func (client *Client) Go(serviceMethod string, args, reply interface{}, done cha
 		}
 		return call
 	}
+
+	// 提取 Context 中的超时和元数据
+	metadata := make(map[string]string)
+	if deadline, ok := ctx.Deadline(); ok {
+		metadata["deadline"] = fmt.Sprintf("%d", deadline.UnixMilli())
+	}
+
 	call := &Call{
 		ServiceMethod: serviceMethod,
 		Args:          args,
 		Reply:         reply,
 		Done:          done,
+		Metadata:      metadata,
 	}
 	// 客户端发送请求
 	client.send(call)
@@ -314,7 +330,7 @@ func (client *Client) Call(ctx context.Context, serviceMethod string, args, repl
 		return errors.New("client instance is nil")
 	}
 	// 异步RPC调用 阻塞Done
-	call := client.Go(serviceMethod, args, reply, make(chan *Call, 1))
+	call := client.goWithContext(ctx, serviceMethod, args, reply, make(chan *Call, 1))
 	select {
 	// RPC调用被外部中断
 	case <-ctx.Done():

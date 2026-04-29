@@ -1,8 +1,8 @@
 package GrowRPC
 
 import (
+	"context"
 	"fmt"
-	"reflect"
 	"testing"
 )
 
@@ -10,13 +10,7 @@ type Foo int
 
 type Args struct{ Num1, Num2 int }
 
-func (f Foo) Sum(args Args, reply *int) error {
-	*reply = args.Num1 + args.Num2
-	return nil
-}
-
-// it's not a exported Method
-func (f Foo) sum(args Args, reply *int) error {
+func (f *Foo) Sum(_ context.Context, args *Args, reply *int) error {
 	*reply = args.Num1 + args.Num2
 	return nil
 }
@@ -27,22 +21,30 @@ func _assert(condition bool, msg string, v ...interface{}) {
 	}
 }
 
-func TestNewService(t *testing.T) {
+func TestRegisterMethod(t *testing.T) {
+	server := NewServer()
 	var foo Foo
-	s := newService(&foo)
-	_assert(len(s.method) == 1, "wrong service Method, expect 1, but got %d", len(s.method))
-	mType := s.method["Sum"]
-	_assert(mType != nil, "wrong Method, Sum shouldn't nil")
+	RegisterMethod[Args, int](server, "Foo.Sum", foo.Sum)
+	handlerI, ok := server.serviceMap.Load("Foo.Sum")
+	_assert(ok, "service Method should be registered")
+	_assert(handlerI != nil, "wrong Method, Sum shouldn't nil")
 }
 
-func TestMethodType_Call(t *testing.T) {
+func TestMethodHandler_Call(t *testing.T) {
+	server := NewServer()
 	var foo Foo
-	s := newService(&foo)
-	mType := s.method["Sum"]
+	RegisterMethod[Args, int](server, "Foo.Sum", foo.Sum)
+	handlerI, _ := server.serviceMap.Load("Foo.Sum")
+	handler := handlerI.(MethodHandler)
 
-	argv := mType.newArgv()
-	replyv := mType.newReplyv()
-	argv.Set(reflect.ValueOf(Args{Num1: 1, Num2: 3}))
-	err := s.call(mType, argv, replyv)
-	_assert(err == nil && *replyv.Interface().(*int) == 4 && mType.NumCalls() == 1, "failed to call Foo.Sum")
+	decodeFunc := func(v interface{}) error {
+		args := v.(*Args)
+		args.Num1 = 1
+		args.Num2 = 3
+		return nil
+	}
+
+	replyInter, err := handler(context.Background(), decodeFunc)
+	reply := replyInter.(*int)
+	_assert(err == nil && *reply == 4, "failed to call Foo.Sum")
 }
